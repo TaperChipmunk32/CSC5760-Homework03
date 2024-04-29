@@ -2,7 +2,6 @@
 2. (8pts) Modify the exercise with one stored in linear load-balanced distribution, and the other in the
 scatter distribution.
 */
-
 #include "mpi.h"
 #include "Distributions.h"
 #include <iostream>
@@ -16,79 +15,111 @@ int main(int argc, char** argv) {
 
     int Q = 2;
     int P = world_size / Q;
-    int M = 30;
+    int M = 12;
 
     // First split based on ranks divided by Q
-    int row_color = world_rank / Q;
-    MPI_Comm row_comm;
-    MPI_Comm_split(MPI_COMM_WORLD, row_color, world_rank, &row_comm);
-
-    // Second split based on ranks mod Q
-    int col_color = world_rank % Q;
+    int col_color = world_rank / Q;
     MPI_Comm col_comm;
     MPI_Comm_split(MPI_COMM_WORLD, col_color, world_rank, &col_comm);
 
+    // Second split based on ranks mod Q
+    int row_color = world_rank % Q;
+    MPI_Comm row_comm;
+    MPI_Comm_split(MPI_COMM_WORLD, row_color, world_rank, &row_comm);
+
     int p = world_rank / Q;
     int q = world_rank % Q;
-    int m, n;
     LinearDistribution x_dist(P, M);
+    ScatterDistribution y_dist(Q, M);
 
     // Process (p,q) will have m elements of x
-    m = x_dist.m(p);
+    int m = x_dist.m(p);
+    // Process (p,q) will have n elements of y
+    int n = y_dist.m(q);
 
     // Allocate the vectors x and y
     int *x_local = new int[m];
-    int *y_local = new int[m];
     for (int i = 0; i < m; i++) {
         x_local[i] = 0;
+    }
+
+    int *y_local = new int[n];
+    for (int i = 0; i < n; i++) {
         y_local[i] = 0;
     }
+    
+    int *x_sendcounts = new int[P];
+    int *x_displs = new int[P];
+    int *y_sendcounts = new int[Q];
+    int *y_displs = new int[Q];
 
     // Process (0,0) will have the initial data
     int *x_global = new int[M];
+    int *y_global = new int[M];
     if (world_rank == 0) {
         for (int i = 0; i < M; i++) {
             x_global[i] = i;
+            y_global[i] = i;
         }
     }
 
-    MPI_Request request;
-    // Scatter x_global to x_local
+    // Scatter global to local
     // Calculate the displacement and count arrays for Iscatterv
-    int *sendcounts = new int[P];
-    int *displs = new int[P];
     for (int i = 0; i < P; i++) {
-        sendcounts[i] = x_dist.m(i);
-        displs[i] = i * m;
+        x_sendcounts[i] = x_dist.m(i);
+        x_displs[i] = i * m;
+    }
+    for (int i = 0; i < Q; i++) {
+        y_sendcounts[i] = y_dist.m(i);
+        y_displs[i] = i * n;
     }
 
-    // Scatter x_global to x_local using Iscatterv
-    MPI_Iscatterv(x_global, sendcounts, displs, MPI_INT, x_local, m, MPI_INT, 0, row_comm, &request);
-    MPI_Wait(&request, MPI_STATUS_IGNORE);
+    MPI_Request scatter_requests[2];
 
-    delete[] sendcounts;
-    delete[] displs;
+    // Scatter global to local using Iscatterv
+    MPI_Iscatterv(x_global, x_sendcounts, x_displs, MPI_INT, x_local, m, MPI_INT, 0, row_comm, &scatter_requests[0]);
+    MPI_Iscatterv(y_global, y_sendcounts, y_displs, MPI_INT, y_local, n, MPI_INT, 0, col_comm, &scatter_requests[1]);
+    
+    MPI_Waitall(2, scatter_requests, MPI_STATUSES_IGNORE);
 
-    int nominal1 = M/P; int extra1 = M%P;
+    delete[] x_sendcounts;
+    delete[] x_displs;
+    delete[] y_sendcounts;
+    delete[] y_displs;
 
-    for(int i = 0; i < m; i++) // m is the local size of the vector x[]
-    { 
-            // x local to global: given that this element is (p,i), what is its global index I?
-        int I = i + ((p < extra1) ? (nominal1+1)*p :
-                (extra1*(nominal1+1)+(p-extra1)*nominal1));
+    MPI_Request bcast_requests[2];
+    
+    // Broadcast x_local to all processes in the row
+    MPI_Ibcast(x_local, m, MPI_INT, 0, col_comm, &bcast_requests[0]);
+    
+    // Broadcast y_local to all processes in the column
+    MPI_Ibcast(y_local, n, MPI_INT, 0, row_comm, &bcast_requests[1]);
+    
+    MPI_Waitall(2, bcast_requests, MPI_STATUSES_IGNORE);
 
-        // so to what (qhat,jhat) does this element of the original global vector go?
-        int qhat = I%Q;
-        int jhat = I/Q;
+    // Compute the dot product
+    int dot_product = 0;
+    for (int i = 0; i < m; i++) {
+        dot_product += x_local[i] * y_local[i];
+    }
 
-        if(qhat == q)  // great, this process has an element of y!
-        { 
-            y_local[jhat] = x_local[i];
-        }
+    // Reduce the dot products to the root process
+    int global_dot_product;
+    MPI_Request reduce_request;
+    MPI_Ireduce(&dot_product, &global_dot_product, 1, MPI_INT, MPI_SUM, 0, MPI_COMM_WORLD, &reduce_request);
+    MPI_Wait(&reduce_request, MPI_STATUS_IGNORE);
+
+    // Broadcast result to all processes
+    MPI_Request bcast_request;
+    MPI_Ibcast(&global_dot_product, 1, MPI_INT, 0, MPI_COMM_WORLD, &bcast_request);
+    MPI_Wait(&bcast_request, MPI_STATUS_IGNORE);
+
+    if (world_rank == 0) {
+        std::cout << "The dot product of the two vectors is " << global_dot_product << std::endl;
     }
 
     //print the results
-    std::cout << "Rank " << world_rank << " has the following values:" << std::endl;
+    std::cout << "World Rank " << world_rank  << "(" << p << ", " << q << ")" << " has the following values:" << std::endl;
     for (int i = 0; i < m; i++) {
         std::cout << " x[" << i << "] = " << x_local[i] << std::endl;
     }
@@ -99,6 +130,7 @@ int main(int argc, char** argv) {
     delete[] x_local;
     delete[] y_local;
     delete[] x_global;
+    delete[] y_global;
 
 
     MPI_Finalize();

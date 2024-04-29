@@ -27,30 +27,39 @@ int main(int argc, char** argv) {
     int M = 30;
 
     // First split based on ranks divided by Q
-    int row_color = world_rank / Q;
-    MPI_Comm row_comm;
-    MPI_Comm_split(MPI_COMM_WORLD, row_color, world_rank, &row_comm);
-
-    // Second split based on ranks mod Q
-    int col_color = world_rank % Q;
+    int col_color = world_rank / Q;
     MPI_Comm col_comm;
     MPI_Comm_split(MPI_COMM_WORLD, col_color, world_rank, &col_comm);
 
+    // Second split based on ranks mod Q
+    int row_color = world_rank % Q;
+    MPI_Comm row_comm;
+    MPI_Comm_split(MPI_COMM_WORLD, row_color, world_rank, &row_comm);
+
     int p = world_rank / Q;
     int q = world_rank % Q;
-    int m, n;
     LinearDistribution x_dist(P, M);
+    LinearDistribution y_dist(Q, M);
 
     // Process (p,q) will have m elements of x
-    m = x_dist.m(p);
+    int m = x_dist.m(p);
+    // Process (p,q) will have n elements of y
+    int n = y_dist.m(q);
 
     // Allocate the vectors x and y
     int *x_local = new int[m];
-    int *y_local = new int[m];
     for (int i = 0; i < m; i++) {
         x_local[i] = 0;
+    }
+
+    int *y_local = new int[n];
+    for (int i = 0; i < n; i++) {
         y_local[i] = 0;
     }
+
+    MPI_Request request;
+    int *sendcounts = new int[P];
+    int *displs = new int[P];
 
     // Process (0,0) will have the initial data
     int *x_global = new int[M];
@@ -60,11 +69,8 @@ int main(int argc, char** argv) {
         }
     }
 
-    MPI_Request request;
     // Scatter x_global to x_local
     // Calculate the displacement and count arrays for Iscatterv
-    int *sendcounts = new int[P];
-    int *displs = new int[P];
     for (int i = 0; i < P; i++) {
         sendcounts[i] = x_dist.m(i);
         displs[i] = i * m;
@@ -72,10 +78,16 @@ int main(int argc, char** argv) {
 
     // Scatter x_global to x_local using Iscatterv
     MPI_Iscatterv(x_global, sendcounts, displs, MPI_INT, x_local, m, MPI_INT, 0, row_comm, &request);
+
     MPI_Wait(&request, MPI_STATUS_IGNORE);
 
     delete[] sendcounts;
     delete[] displs;
+
+    // Broadcast x_local to all processes in the row
+    MPI_Request bcast_request;
+    MPI_Ibcast(x_local, m, MPI_INT, 0, col_comm, &bcast_request);
+    MPI_Wait(&bcast_request, MPI_STATUS_IGNORE);
 
     int nominal1 = M/P; int extra1 = M%P;
     int nominal2 = M/Q; int extra2 = M%Q;
@@ -98,8 +110,12 @@ int main(int argc, char** argv) {
         }
     }
 
+    MPI_Request reduce_request;
+    MPI_Iallreduce(MPI_IN_PLACE, y_local, n, MPI_INT, MPI_SUM, col_comm, &reduce_request);
+    MPI_Wait(&reduce_request, MPI_STATUS_IGNORE);
+
     //print the results
-    std::cout << "Rank " << world_rank << " has the following values:" << std::endl;
+    std::cout << "World Rank " << world_rank  << "(" << p << ", " << q << ")" << " has the following values:" << std::endl;
     for (int i = 0; i < m; i++) {
         std::cout << " x[" << i << "] = " << x_local[i] << std::endl;
     }
