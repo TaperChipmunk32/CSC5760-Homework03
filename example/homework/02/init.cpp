@@ -2,7 +2,7 @@ using namespace std;
 #include <iostream>
 #include <assert.h>
 #include <string>
-
+#include <Kokkos_Core.hpp>
 #include <mpi.h>
 #include "Distributions.h" // contains LinearDistribution class.
 
@@ -474,16 +474,16 @@ void update_domain(Domain &new_domain, Domain &old_domain, Process_2DGrid &grid)
   // we can compute on the interior of old_domain.
 
   // the entirety of the domain is computed so {replace with Kokkos kernel for HW#3}
-  for(int i = 0; i < m ; ++i)
-    for(int j = 0; j < n; ++j)
-    {
+  Kokkos::parallel_for("update_domain", Kokkos::RangePolicy<>(0, m), KOKKOS_LAMBDA(int i) {
+    Kokkos::parallel_for(Kokkos::RangePolicy<>(0, n), KOKKOS_LAMBDA(int j) {
       int neighbor_count =
-         old_domain(i-1,j-1)+old_domain(i-1,j)+old_domain(i-1,j+1)
-	+old_domain(i,  j-1)+0                +old_domain(i,  j+1)
-	+old_domain(i+1,j-1)+old_domain(i+1,j)+old_domain(i+1,j+1);
+        old_domain(i-1,j-1)+old_domain(i-1,j)+old_domain(i-1,j+1)
+        +old_domain(i,  j-1)+0                +old_domain(i,  j+1)
+        +old_domain(i+1,j-1)+old_domain(i+1,j)+old_domain(i+1,j+1);
       
       new_domain(i,j) = update_the_cell(old_domain(i,j), neighbor_count);
-    } // end for(j...) for(i...)
+    });
+  });
 
   // remember, in a performant code, we would encapsulate the
   // dynamic memory allocation once level higher in the code...
